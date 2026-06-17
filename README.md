@@ -327,38 +327,6 @@ Included:
 * Analysis pipelines
 * Documentation
 
-Excluded:
-
-* Generated datasets
-* Model checkpoints
-* Output artifacts
-* Temporary files
-
-These can be recreated by running the notebooks.
-
----
-
-# Requirements
-
-See:
-
-```text
-requirements.txt
-```
-
-Main libraries:
-
-* NumPy
-* Pandas
-* Matplotlib
-* SciPy
-* Scikit-Learn
-* PyTorch
-* Pillow
-* Astropy
-* Scikit-Image
-* Jupyter
-
 ---
 
 ## Project Status
