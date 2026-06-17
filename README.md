@@ -261,8 +261,8 @@ Providing relevant observational information is often more important than increa
 Clone the repository:
 
 ```bash
-git clone https://github.com/your-username/black-hole-observational-memory.git
-cd black-hole-observational-memory
+git clone https://github.com/Malbasahi/Black-Hole-Observational-Memory-Project.git
+cd Black-Hole-Observational-Memory-Project
 ```
 
 Install dependencies:
