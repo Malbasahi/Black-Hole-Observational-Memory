@@ -1,258 +1,121 @@
-# Observational Memory Horizons of Black Holes
+# Black Hole Observational Memory
 
-## Quantifying the Recoverability of Event Identity and Event Timing from Synthetic and Realistic Observations
+## Observational Memory Horizons of Black Holes: Quantifying the Recoverability of Event Identity and Event Timing from Synthetic and Realistic Observations
 
 <p align="center">
-  <img src="figures/black_hole_simulator_preview.png" width="900">
+  <img src="figures/black_hole_simulator_preview.png" width="1000">
 </p>
 
 <p align="center">
-  <em>Real-time GPU black-hole simulator used as the foundation for synthetic observational memory experiments.</em>
+  <em>
+  Real-time GPU black-hole simulator used to generate synthetic observations for memory persistence experiments.
+  </em>
 </p>
 
+---
+
+## What if black holes could be remembered?
+
+Modern astronomy can observe the environments surrounding black holes, but can those observations reveal information about events that happened in the past?
+
+This project introduces the concept of **Observational Memory** — the idea that black-hole observations may retain recoverable traces of previous physical events.
+
+Using simulation, machine learning, morphology analysis, temporal observations, and comparisons with realistic astrophysical data, this research investigates:
+
+* What happened?
+* When did it happen?
+* How long does that information remain observable?
 
 ---
 
-## Overview
+## Key Idea
 
-This project investigates a fundamental question:
+The project treats black-hole observations as **memory-bearing systems**.
 
-> Can observations of a black hole retain recoverable information about events that happened in its past?
+Instead of asking:
 
-Black holes are traditionally viewed as systems that conceal information behind an event horizon. However, the observable environment surrounding a black hole, its accretion disk, photon ring, jet structures, and emitted radiation, may preserve detectable signatures of past physical activity.
+> How does a black hole look?
 
-This project introduces the concept of **Observational Memory**, a framework for studying how much information about previous events remains encoded in black-hole observations and for how long that information can be recovered.
+this project asks:
 
-Using synthetic simulations, machine learning models, morphology analysis, temporal observations, and comparisons with realistic astrophysical data products, this research explores the limits of recovering historical information from black-hole imagery.
+> What can a black-hole observation remember?
 
 ---
 
-## Core Research Question
+## Main Results
 
-The project investigates two complementary questions:
+### Event Identity Is Recoverable
 
-### Event Identity
-
-**What happened?**
+Past events leave recognizable signatures that can often be identified from observations.
 
 Examples:
 
-* Accretion burst
-* Jet eruption
-* Turbulence spike
-* Spin transition
-
-### Event Timing
-
-**When did it happen?**
-
-Can an observation determine how long ago a physical event occurred?
+* Accretion bursts
+* Jet eruptions
+* Turbulence spikes
+* Spin transitions
 
 ---
 
-## Key Concepts
+### Event Timing Is Much Harder
 
-### Observational Memory
-
-The persistence of detectable signatures from past physical events within a current observation.
-
-### Memory Persistence
-
-The duration over which information about a past event remains recoverable.
-
-### Memory Horizon
-
-The maximum observational timescale over which information can be reliably recovered.
-
-### Event Recoverability
-
-The ability of an analysis method to reconstruct information about past events from observational data.
+Determining **when** an event occurred is significantly more difficult than determining **what** happened.
 
 ---
 
-## Scientific Motivation
+### Observation Timing Matters
 
-Modern observatories such as the Event Horizon Telescope (EHT) provide unprecedented views of black-hole environments.
+Observing an event directly dramatically improves recoverability.
 
-While current observations capture the present state of a system, an open question remains:
+The timing of the observation often matters more than increasing model complexity.
 
-> Do these observations contain measurable traces of past activity?
+---
 
-Understanding observational memory could help improve:
+### Memory Persistence Exists
 
-* Interpretation of black-hole observations
-* Observation scheduling strategies
-* Analysis of transient astrophysical phenomena
-* Synthetic-to-real data transfer methods
-* Future machine-learning approaches in astrophysics
+Information about past events remains observable for finite periods.
+
+The project introduces:
+
+* Memory Persistence
+* Memory Half-Life
+* Memory Horizons
+
+as quantitative measures of observational memory.
+
+---
+
+# Research Framework
+
+```text
+Synthetic Black-Hole Universe
+            ↓
+Memory Persistence Experiments
+            ↓
+Event Recoverability Analysis
+            ↓
+GRMHD-Inspired Morphology Layer
+            ↓
+Real Observation Consistency Study
+```
 
 ---
 
 # Project Structure
 
-## Phase 1–5: Synthetic Black Hole Generation
-
-Development of a controllable black-hole simulation framework capable of generating:
-
-* Accretion disks
-* Photon rings
-* Jet-like structures
-* Turbulent features
-* Variable physical parameters
-
-These phases establish the synthetic environment used throughout the project.
-
----
-
-## Phase 2 & 2.2: Reconstruction Models
-
-Physics-aware U-Net models are trained to reconstruct clean observations from corrupted inputs.
-
-Goals:
-
-* Denoising
-* Structure preservation
-* Memory-preserving reconstruction
-
----
-
-## Phase 4 Series: Parameter Recovery
-
-Machine-learning models are trained to recover hidden physical parameters from synthetic observations.
-
-Examples:
-
-* Black-hole mass
-* Spin
-* Accretion rate
-* Jet power
-* Turbulence strength
-
----
-
-## Phase 5 Series: Memory-Preserving Dataset Design
-
-The synthetic generator is improved to increase coupling between:
-
-* Physical parameters
-* Observable morphology
-* Temporal history
-
-These phases strengthen the relationship between hidden physics and visible structure.
-
----
-
-## Phase 6: Static Memory Persistence
-
-Question:
-
-> Can a single final image recover information about a past event?
-
-This phase introduces event histories and measures:
-
-* Event identity recoverability
-* Event timing recoverability
-* Memory persistence curves
-* Memory half-life
-
----
-
-## Phase 6-T: Temporal Observation
-
-Question:
-
-> Does observing a short sequence improve recoverability?
-
-Temporal clips near the final observation are analyzed.
-
----
-
-## Phase 6-U: Event-Centered Observation
-
-Question:
-
-> Does observing the event directly improve recoverability?
-
-This phase centers observations around the event itself and studies how recoverability changes.
-
----
-
-## Phase 7-A: Real Observation Consistency Study
-
-Question:
-
-> Do synthetic memory signatures resemble realistic black-hole observations?
-
-This phase compares:
-
-* Synthetic observations
-* EHT-derived products
-* External black-hole imagery
-* GRMHD-inspired morphology references
-
-using morphology-space and latent-space analysis.
-
----
-
-## Phase 7-A.1: External Dataset Acquisition
-
-Automated acquisition and organization of:
-
-* Public EHT repositories
-* External observation products
-* FITS-based data products
-
----
-
-## Phase 7-A.2: GRMHD Image Harvesting
-
-Creation of a GRMHD-inspired morphology reference library that serves as a bridge between:
-
-```text
-Synthetic Simulations
-        ↓
-GRMHD-Inspired Morphologies
-        ↓
-Real Observations
-```
-
----
-
-## Final Audit & Synthesis
-
-The project concludes with a comprehensive audit that:
-
-* Aggregates results across all phases
-* Generates publication-ready figures
-* Produces thesis-style summaries
-* Quantifies memory persistence metrics
-* Compares observation strategies
-
----
-
-# Main Findings
-
-The project demonstrates several important results:
-
-### 1. Event Identity Is Recoverable
-
-Black-hole observations can retain detectable information about the type of event that occurred.
-
-### 2. Event Timing Is Much Harder
-
-Determining exactly when an event occurred is significantly more difficult than identifying the event itself.
-
-### 3. Observation Timing Matters
-
-The timing of an observation strongly influences recoverability.
-
-### 4. Event-Centered Observations Improve Recovery
-
-Observations made near the event dramatically improve event identification.
-
-### 5. Information Availability Dominates Model Complexity
-
-Providing relevant observational information is often more important than increasing model complexity.
+| Phase          | Description                                                   |
+| -------------- | ------------------------------------------------------------- |
+| Phase 1–5      | Synthetic black-hole generation and physics-to-image coupling |
+| Phase 2–2.2    | Memory-preserving reconstruction models                       |
+| Phase 4 Series | Physical parameter recovery                                   |
+| Phase 5 Series | Dataset and morphology refinement                             |
+| Phase 6        | Static memory persistence                                     |
+| Phase 6-T      | Temporal observation study                                    |
+| Phase 6-U      | Event-centered observation study                              |
+| Phase 7-A      | Real observation consistency analysis                         |
+| Phase 7-A.1    | External dataset acquisition                                  |
+| Phase 7-A.2    | GRMHD image harvesting                                        |
+| Final Audit    | Publication-ready synthesis                                   |
 
 ---
 
@@ -262,7 +125,7 @@ Clone the repository:
 
 ```bash
 git clone https://github.com/Malbasahi/Black-Hole-Observational-Memory.git
-cd Black-Hole-Observational-Memory-Project
+cd Black-Hole-Observational-Memory
 ```
 
 Install dependencies:
@@ -273,21 +136,7 @@ pip install -r requirements.txt
 
 ---
 
-# Recommended Environment
-
-Python 3.10+
-
-GPU recommended but not required.
-
-Tested with:
-
-* Ubuntu Linux
-* PyTorch
-* Jupyter Notebook
-
----
-
-# Running the Project
+# Quick Start
 
 Launch Jupyter:
 
@@ -295,25 +144,47 @@ Launch Jupyter:
 jupyter notebook
 ```
 
-Suggested execution order:
+Recommended execution order:
 
-### Core Study
+```text
+Phase 5
+↓
+Phase 2.2
+↓
+Phase 6
+↓
+Phase 6-T
+↓
+Phase 6-U
+↓
+Final Audit
+↓
+Phase 7-A.1
+↓
+Phase 7-A.2
+↓
+Phase 7-A
+```
 
-1. Phase 5 Dataset Generation
-2. Phase 2.2 Reconstruction
-3. Phase 6 Static Memory Persistence
-4. Phase 6-T Temporal Observation
-5. Phase 6-U Event-Centered Observation
+---
 
-### External Consistency Study
+# Scientific Contribution
 
-6. Phase 7-A.1 External Dataset Acquisition
-7. Phase 7-A.2 GRMHD Image Harvesting
-8. Phase 7-A Real Observation Consistency Study
+This project introduces a new framework for studying:
 
-### Final Analysis
+### Observational Memory
 
-9. Final Audit & Synthesis
+The persistence of detectable signatures from past physical events.
+
+### Event Recoverability
+
+The ability to recover information about previous events from current observations.
+
+### Memory Horizons
+
+The maximum timescale over which event information remains recoverable.
+
+Together, these concepts provide a new way to study information persistence in black-hole environments.
 
 ---
 
@@ -322,21 +193,49 @@ Suggested execution order:
 Included:
 
 * Source code
-* Notebooks
 * Simulation framework
+* Research notebooks
 * Analysis pipelines
 * Documentation
 
+Excluded:
+
+* Generated datasets
+* Trained checkpoints
+* Output artifacts
+
+All results can be reproduced locally.
+
 ---
 
-## Project Status
+# Technology Stack
+
+* Python
+* PyTorch
+* NumPy
+* SciPy
+* Scikit-Learn
+* Astropy
+* OpenCV
+* Scikit-Image
+* Jupyter
+
+---
+
+# Project Status
 
 Active Independent Research Project
 
-Current Focus:
+Current research direction:
 
-* Observational Memory
-* Event Recoverability
-* Memory Horizons
-* Synthetic-to-Real Consistency
-* Black-Hole Morphology Analysis
+**Synthetic → GRMHD → Real Observation Consistency**
+
+---
+
+## Citation
+
+If you use this repository, please cite:
+
+**Marwa Albasahi**
+
+*Observational Memory Horizons of Black Holes: Quantifying the Recoverability of Event Identity and Event Timing from Synthetic and Realistic Observations*
