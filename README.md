@@ -2,6 +2,9 @@
 
 ## Quantifying the Recoverability of Event Identity and Event Timing from Synthetic and Realistic Observations
 
+<p align="center">
+  <img src="figures/black_hole_simulator_preview.png">
+</p>
 ---
 
 ## Overview
