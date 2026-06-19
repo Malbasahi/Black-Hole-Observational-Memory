@@ -12,7 +12,17 @@
   </em>
 </p>
 
+## Research Pipeline
 
+<p align="center">
+  <img src="figures/overview_pipeline.png" width="1200">
+</p>
+
+<p align="center">
+  <em>
+  End-to-end research workflow spanning synthetic black-hole generation, observational-memory analysis, GRMHD-inspired bridging, synthetic-to-real calibration, robustness testing, and expanded external validation.
+  </em>
+</p>
 
 ## Overview
 
