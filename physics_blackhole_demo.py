@@ -1,46 +1,60 @@
-# black_hole_kerr_reference_simulator_science_calibrated_cinematic.py
-# Real-time GPU black-hole visualization with balanced NASA sky, clean spacetime grid, cinematic accretion, and reference-style side panels.
-# Dependencies: pip install pygame moderngl numpy pillow
-# Run: python black_hole_kerr_reference_simulator_science_calibrated_cinematic.py
+# physics_blackhole_demo.py
+# Real-time black-hole visualization using Pygame, ModernGL, and a procedural
+# star-only sky. The script renders a black-hole shadow, photon-ring structure,
+# accretion flow, spacetime-grid guide, UI controls, screenshots, and benchmarks.
 #
-# Scientific note: this is an optical/cinematic gravitational-lensing visualization,
-# not a direct EHT radio reconstruction and not a full GRMHD solver. The final
-# picture intentionally keeps the polished Milky Way/stars/disk palette, while
-# hidden physical fields now guide the render: Kerr ISCO/horizon scaling,
-# capped transverse null-ray bending, g^3 redshift/Doppler cues, optical-depth
-# hints, magnetic/synchrotron modulation, and critical-impact photon-ring weights.
+# Dependencies:
+#   pip install pygame moderngl numpy
+#
+# Run:
+#   python physics_blackhole_demo_repo_stars_only_github.py
+#
+# This file is self-contained. It does not need a Milky Way image, EXR panorama,
+# or other large texture asset; the sky is generated in the shader from compact
+# procedural star layers.
+#
+# Scientific scope:
+# This is a physically inspired, real-time educational visualization. It is not a
+# full Kerr geodesic solver, numerical-relativity code, EHT reconstruction, or
+# GRMHD radiative-transfer simulation. The shader keeps the render interactive by
+# using fast approximations for gravitational bending, disk emission, and lensing.
+#
+# Physical ideas used by the renderer:
+#   - Kerr-inspired horizon and ISCO radii are computed on the CPU.
+#   - Scene-space disk radii are mapped to physical radii in units of GM/c^2.
+#   - Orbital motion follows a Kerr-like Keplerian angular frequency.
+#   - Redshift and Doppler effects are summarized by a frequency-shift factor g.
+#   - Specific intensity is modulated with an approximate I_nu proportional to g^3.
+#   - The accretion texture is guided by thin-disk temperature, optical-depth,
+#     magnetic-field, and synchrotron-emission cues.
+#   - Photon-ring highlights are tied to a critical-impact-parameter proxy.
+#
+# Controls and modes:
+#   1 / 2 / 3 / 4  choose cinematic, balanced, strong-physics, or diagnostic mode
+#   5 / 6          public-demo camera presets
+#   7              physics-explanation preset with diagnostic overlay
+#   8              cinematic export preset with UI hidden
+#   P              save the visible frame
+#   O              save a clean frame without UI panels
+#   B              benchmark the current mode and export timing data
+#   J / K          decrease / increase procedural star detail
 
 import sys
 import math
 from pathlib import Path
 from dataclasses import dataclass
+from datetime import datetime
 
 import moderngl
 import numpy as np
 import pygame
-from PIL import Image
 
 
 WIDTH, HEIGHT = 1536, 864
 FPS = 60
 
-# Preferred NASA all-sky asset. Put the downloaded file beside this script.
-# NOTE: .opdownload is usually an incomplete Opera/Chromium download. The script
-# will try to read it, but a completed/renamed .exr, .png, or .jpg is strongly preferred.
-SKY_TEXTURE_CANDIDATES = (
-    "starmap_2020_16k_gal.exr",
-    "starmap_2020_16k_gal.exr.opdownload",
-    "starmap_2020_16k_gal.png",
-    "starmap_2020_16k_gal.jpg",
-    "milky_way_4k.jpg",
-    "milky_way_sky_generated.png",
-)
-
-# 16K EXR is excellent, but uploading full 16K to the GPU can consume hundreds of MB.
-# This keeps the web-demo/runtime fast while preserving much more detail than 4K.
-SKY_MAX_UPLOAD_SIZE = (4096, 2048)
-SKY_MIN_RUNTIME_SIZE = (4096, 2048)
-FALLBACK_SKY_PATH = Path(__file__).with_name("milky_way_sky_generated.png")
+EXPORT_DIR = Path(__file__).with_name("blackhole_exports")
+BENCHMARK_FRAMES = 180
 
 
 VERTEX_SHADER = """
@@ -76,12 +90,13 @@ uniform float u_show_ring;
 uniform float u_show_grid;
 uniform float u_show_stars;
 uniform float u_show_particles;
-uniform sampler2D u_background;
 uniform float u_exposure;
 uniform float u_contrast;
 uniform float u_saturation;
 uniform float u_bloom;
 uniform float u_science_overlay;
+uniform float u_science_strength;
+uniform float u_star_detail;
 
 in vec2 v_uv;
 out vec4 fragColor;
@@ -136,30 +151,11 @@ vec3 hotColor(float x) {
 }
 
 vec3 tonemap(vec3 c) {
-    // Filmic-ish tonemap with less black crushing than the old curve.
+    // ACES-style filmic tone mapping compresses high dynamic range into the
+    // displayable 0..1 range while keeping bright disk regions smooth.
     c = max(c, vec3(0.0));
     c = (c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14);
     return pow(clamp(c, 0.0, 1.0), vec3(0.92));
-}
-
-vec3 sampleSkyTexture(vec2 uv) {
-    // The NASA all-sky map already contains a real stellar distribution.
-    // Sample a low mip level and compress highlights so the background reads
-    // as deep space instead of a noisy wall of bright points.
-    vec3 c0 = textureLod(u_background, uv, 1.15).rgb;
-    vec3 c1 = textureLod(u_background, uv, 2.25).rgb;
-    vec3 c = mix(c0, c1, 0.18);
-
-    c = pow(clamp(c, 0.0, 1.0), vec3(2.2));
-    float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
-
-    // Compress compact bright stars more than diffuse Milky Way dust.
-    float highlightCompress = mix(1.0, 0.42, smoothstep(0.055, 0.46, luma));
-    c *= highlightCompress;
-
-    // Keep the galactic band visible, but less harsh and less crowded.
-    c = mix(c, vec3(luma), 0.08);
-    return c;
 }
 
 vec3 cameraPosition() {
@@ -182,11 +178,65 @@ vec3 getRay(vec2 p, vec3 ro) {
     return normalize(cam * vec3(p, 1.88));
 }
 
+vec3 stellarColor(float t) {
+    // Approximate stellar color-temperature palette. Hotter stars are blue-white,
+    // Sun-like stars are pale white, and cooler stars are warmer orange.
+    vec3 blueWhite = vec3(0.58, 0.70, 1.00);
+    vec3 solar     = vec3(1.00, 0.96, 0.82);
+    vec3 warm      = vec3(1.00, 0.70, 0.38);
+    vec3 c = mix(blueWhite, solar, smoothstep(0.10, 0.66, t));
+    return mix(c, warm, smoothstep(0.78, 1.0, t));
+}
+
+vec3 separatedStarLayer(vec2 uv, float scale, float threshold, float corePx,
+                        float haloPx, float maxBrightness, float density,
+                        float detail, float seed) {
+    // One possible star is placed in each sky cell. A high threshold keeps most
+    // cells empty, and a small random offset prevents the sky from looking like a grid.
+    vec2 p = uv * vec2(scale, scale * 0.54);
+    vec2 id = floor(p);
+    vec2 f = fract(p);
+
+    float r = hash21(id + seed);
+    float localThreshold = threshold - detail * 0.00125 - (density - 1.0) * 0.00035;
+    float starMask = step(localThreshold, r);
+
+    vec2 offset = vec2(hash21(id + seed + 13.7), hash21(id + seed + 29.1)) - 0.5;
+    vec2 q = f - 0.5 - offset * 0.24;
+    float d2 = dot(q, q);
+
+    // Pixel-scaled Gaussian kernels keep each star compact. The fwidth() term
+    // estimates screen-space pixel size so star cores stay readable but not bloated.
+    float px = max(max(fwidth(p.x), fwidth(p.y)), 0.00085);
+    float coreSigma = max(px * corePx, 0.0016);
+    float pinSigma = max(coreSigma * 0.52, 0.0011);
+    float haloSigma = max(px * haloPx, coreSigma * 1.65);
+
+    float pin = exp(-0.5 * d2 / (pinSigma * pinSigma));
+    float core = exp(-0.5 * d2 / (coreSigma * coreSigma));
+    float halo = exp(-0.5 * d2 / (haloSigma * haloSigma)) * 0.010;
+
+    float temp = hash21(id + seed + 5.4);
+    vec3 col = stellarColor(temp);
+
+    // Stellar magnitudes are distributed so faint stars are common and bright
+    // stars are rare, matching the way real star fields are visually dominated by
+    // many small points and a few brighter objects.
+    float luminosityRand = hash21(id + seed + 61.0);
+    float magnitude = pow(luminosityRand, 4.2);
+    float brightness = mix(maxBrightness * 0.22, maxBrightness, magnitude);
+    brightness *= mix(0.88, 1.18, detail) * (0.96 + 0.08 * density);
+
+    return starMask * col * brightness * (pin * 0.55 + core * 1.05 + halo);
+}
+
 vec3 starfield(vec3 rd) {
     if (u_show_stars < 0.5) return vec3(0.0);
 
     vec3 d = normalize(rd);
 
+    // The sky direction is gently rotated before projection. This gives the star
+    // pattern a stable orientation without relying on an external panorama.
     float yaw = -0.34 + 0.008 * sin(u_time * 0.014);
     float roll = 0.58;
     mat3 ry = mat3(
@@ -206,67 +256,32 @@ vec3 starfield(vec3 rd) {
         asin(skyDir.y) / PI + 0.5
     );
 
-    // Photographic base sky: intentionally restrained so it supports the black hole.
-    vec3 col = sampleSkyTexture(uv) * 0.78;
+    float detail = clamp(u_star_detail, 0.0, 1.0);
 
-    // Subtle dust structure, not extra star snow.
-    vec3 g = normalize(vec3(
-        d.x * 0.82 + d.y * 0.35 - d.z * 0.45,
-       -d.x * 0.30 + d.y * 0.92 + d.z * 0.24,
-        d.x * 0.48 - d.y * 0.16 + d.z * 0.86));
-    float plane = exp(-pow(abs(g.y) * 3.85, 2.0));
-    float planeThin = exp(-pow(abs(g.y) * 10.5, 2.0));
+    // Deep space is not perfectly flat black. A very faint blue-black floor helps
+    // the small procedural stars sit naturally in the background.
+    float skyMottle = fbm(uv * vec2(3.2, 1.7) + vec2(0.21, 0.37));
+    float densityNoise = fbm(uv * vec2(4.2, 2.0) + vec2(-1.7, 0.4));
+    float density = mix(0.94, 1.06, smoothstep(0.18, 0.92, densityNoise));
 
-    float cloudA = fbm(uv * vec2(4.8, 2.1) + vec2(0.17, 0.31));
-    float cloudB = fbm(uv * vec2(12.5, 5.8) + vec2(-0.41, 0.09));
-    float lane = smoothstep(0.53, 0.92, fbm(uv * vec2(19.0, 8.0) + vec2(1.4, 2.1)));
+    vec3 col = vec3(0.0011, 0.0015, 0.0032);
+    col += vec3(0.0010, 0.0013, 0.0024) * skyMottle * 0.10;
 
-    col += vec3(0.014, 0.019, 0.034) * cloudA * plane * 0.13;
-    col += vec3(0.042, 0.027, 0.016) * cloudB * planeThin * 0.08;
-    col *= 1.0 - lane * plane * 0.18;
+    // Multiple star layers simulate magnitude classes: coarse layers create the
+    // rare brighter stars, while finer layers add many distant pinpoints.
+    col += separatedStarLayer(uv,   80.0, 0.944, 1.35, 2.10, 0.82, density, detail,  11.0);
+    col += separatedStarLayer(uv,  145.0, 0.958, 1.12, 1.85, 0.64, density, detail,  37.0);
+    col += separatedStarLayer(uv,  275.0, 0.974, 0.92, 1.55, 0.45, density, detail,  73.0);
+    col += separatedStarLayer(uv,  540.0, 0.988, 0.78, 1.32, 0.29, density, detail, 131.0);
+    col += separatedStarLayer(uv,  960.0, 0.994, 0.68, 1.15, 0.20, density, detail, 211.0);
+    col += separatedStarLayer(uv, 1500.0, 0.997, 0.58, 1.05, 0.13, density, detail, 307.0);
 
-    // Sparse procedural enhancement. These are only rare highlights layered over
-    // the NASA map, avoiding the fake crowded/snowy look.
-    for (int layer = 0; layer < 2; layer++) {
-        float scale = layer == 0 ? 460.0 : 920.0;
-        float threshold = layer == 0 ? 0.99905 : 0.99955;
-
-        vec2 p = uv * vec2(scale, scale * 0.54);
-        vec2 id = floor(p);
-        vec2 f = fract(p);
-        float rnd = hash21(id + float(layer) * 27.31);
-        float star = smoothstep(threshold, 1.0, rnd);
-
-        vec2 offset = vec2(hash21(id + 3.1), hash21(id + 9.7)) - 0.5;
-        float dist = length(f - 0.5 - offset * 0.34);
-        float core = exp(-dist * (layer == 0 ? 32.0 : 52.0));
-        float halo = exp(-dist * 8.5) * 0.040;
-
-        float temp = hash21(id + 8.3);
-        vec3 starCol = mix(vec3(0.62, 0.74, 1.0), vec3(1.0, 0.94, 0.82), smoothstep(0.08, 0.64, temp));
-        starCol = mix(starCol, vec3(1.0, 0.68, 0.35), smoothstep(0.78, 1.0, temp));
-
-        float boost = 0.70 + planeThin * 0.30;
-        float brightness = mix(0.035, 0.45, hash21(id + 4.7)) * boost;
-        col += star * starCol * brightness * (core + halo);
-    }
-
-    // Rare bright foreground stars: soft, not cross-shaped or over-bloomed.
-    vec2 bp = uv * vec2(185.0, 98.0);
-    vec2 bid = floor(bp);
-    vec2 bf = fract(bp);
-    float br = hash21(bid + 91.7);
-    float brightStar = smoothstep(0.99965, 1.0, br);
-    vec2 boff = vec2(hash21(bid + 12.4), hash21(bid + 29.1)) - 0.5;
-    vec2 bq = bf - 0.5 - boff * 0.30;
-    float bdist = length(bq);
-    vec3 brightCol = mix(vec3(0.64, 0.76, 1.0), vec3(1.0, 0.70, 0.36), hash21(bid + 11.0));
-    col += brightStar * brightCol * exp(-bdist * 32.0) * 0.34;
-    col += brightStar * brightCol * exp(-bdist * 9.0) * 0.075;
+    // A final sparse layer adds occasional brighter foreground stars without
+    // turning them into large glowing blobs.
+    col += separatedStarLayer(uv,  115.0, 0.989, 1.45, 2.30, 1.05, density, detail, 401.0) * 0.75;
 
     return col;
 }
-
 float gridLine(float x, float w) {
     float g = abs(fract(x) - 0.5);
     return 1.0 - smoothstep(w * 0.35, w, g);
@@ -279,8 +294,9 @@ vec3 sampleGrid(vec3 p) {
     float r = length(p.xz) + 0.0001;
     if (r < horizon * 1.08) return vec3(0.0);
 
-    // Clean embedding-diagram sheet inspired by the second reference: visible,
-    // organized, and low-emission rather than neon/cyan beams.
+    // Visual embedding diagram for the spacetime grid. The sheet is pulled down
+    // near the hole with a simple well term, z_well ~ -K/(r + offset), so the grid
+    // communicates curvature without acting like physical plasma emission.
     float well = -0.82 * (horizon * 2.10) / (r + horizon * 1.20);
     float d = abs(p.y - well);
 
@@ -314,42 +330,45 @@ vec3 sampleGrid(vec3 p) {
 }
 
 float visualMassScale() {
-    // Keep the mass slider meaningful for the UI/readout while preventing the
-    // apparent angular size from exploding. This is equivalent to keeping the
-    // camera framing calibrated as mass changes.
+    // The mass slider affects the physical readout and lensing strength, but the
+    // visual scale is softly clamped. Apparent black-hole size depends on both mass
+    // and camera distance, so this keeps interactive framing stable.
     return clamp(u_mass / 9.87, 0.80, 1.15);
 }
 
 float sceneDiskInnerRadius(float visualHorizon) {
-    // Kerr prograde ISCO in GM/c^2 is supplied by the CPU. The visual mapping is
-    // intentionally subtle so spin informs the inner edge without destroying the
-    // existing cinematic silhouette.
+    // Kerr prograde ISCO radius is supplied by the CPU in units of GM/c^2. Higher
+    // spin moves the stable inner disk edge inward, and this function maps that
+    // physical trend into the scene scale.
     float t = clamp((u_isco - 1.237) / (6.0 - 1.237), 0.0, 1.0);
     return visualHorizon * mix(1.14, 1.24, t);
 }
 
 float physicalDiskRadius(float rScene, float innerScene) {
-    // Scene radius -> physical radius in GM/c^2, anchored at the spin-dependent
-    // ISCO. This hidden coordinate drives orbital velocity, temperature, and g.
+    // Convert scene radius into an approximate physical radius in GM/c^2. This
+    // hidden coordinate drives orbital speed, disk temperature, and redshift.
     return max(u_horizon_kerr + 0.05, u_isco * rScene / max(innerScene, 0.001));
 }
 
 float keplerianOmega(float rPhys) {
-    // Prograde Kerr circular-orbit angular frequency in geometrized units.
+    // Kerr-like prograde circular-orbit frequency in geometrized units:
+    // omega = 1 / (r^(3/2) + a), where a is the dimensionless spin.
     return 1.0 / (pow(max(rPhys, 1.001), 1.5) + clamp(u_spin, 0.0, 0.998));
 }
 
 float thinDiskTemperature(float rScene, float innerScene) {
-    // Shakura-Sunyaev / Novikov-Thorne inspired radial profile, normalized for
-    // color and modulation rather than absolute Kelvin.
+    // Thin-disk temperature profile inspired by Shakura-Sunyaev and Novikov-Thorne
+    // disks. The r^(-3/4) trend makes inner material hotter; the no-torque factor
+    // softens emission at the ISCO. The result is normalized for color, not Kelvin.
     float x = max(rScene / max(innerScene, 0.001), 1.001);
     float noTorque = pow(max(1.0 - inversesqrt(x), 0.0), 0.25);
     return clamp(pow(x, -0.75) * noTorque * 2.55, 0.0, 1.20);
 }
 
 float redshiftFactor(vec3 orbitalDir, vec3 rd, float rPhys) {
-    // Controlled approximation of g = (k_mu u_obs^mu)/(k_mu u_em^mu).
-    // It combines orbital Doppler shift with a Schwarzschild-like redshift term.
+    // Approximate frequency-shift factor g = nu_observed / nu_emitted. It combines
+    // special-relativistic Doppler shift from orbital motion with a simple
+    // gravitational-redshift term near the black hole.
     float a = clamp(u_spin, 0.0, 0.998);
     float beta = clamp(sqrt(1.0 / max(rPhys, 2.20)) * (0.56 + 0.10 * a), 0.025, 0.62);
     float gamma = inversesqrt(max(0.001, 1.0 - beta * beta));
@@ -360,22 +379,29 @@ float redshiftFactor(vec3 orbitalDir, vec3 rd, float rPhys) {
 }
 
 float relativisticBeaming(vec3 orbitalDir, vec3 rd, float rPhys) {
-    // Frequency-specific synchrotron intensity follows I_nu ~ g^3. We blend the
-    // physical factor into unity so the current cinematic exposure is preserved.
+    // Relativistic beaming uses the invariant transfer relation I_nu / nu^3.
+    // This gives the familiar I_nu proportional to g^3 brightness change, with
+    // clamps so the interactive image remains readable.
     float g = redshiftFactor(orbitalDir, rd, rPhys);
-    return clamp(mix(1.0, pow(g, 3.0), 0.58), 0.42, 3.55);
+
+    float beamStrength = mix(0.58, 0.82, u_science_strength);
+    float minBeam = mix(0.42, 0.34, u_science_strength);
+    float maxBeam = mix(3.55, 4.40, u_science_strength);
+
+    return clamp(mix(1.0, pow(g, 3.0), beamStrength), minBeam, maxBeam);
 }
 
 float criticalImpactParam() {
-    // Scene-space proxy for the Schwarzschild/Kerr critical curve. It is mapped
-    // to the current preferred photon-ring radius rather than raw screen pixels.
+    // Scene-space proxy for the photon critical curve. Rays near this impact
+    // parameter skim the photon region and contribute to the thin bright ring.
     float horizon = 0.62;
     return horizon * (1.18 - 0.022 * clamp(u_spin, 0.0, 0.998));
 }
 
 float geodesicWindingFromImpact(float b) {
-    // Near the critical impact parameter, null rays wind around the hole. This
-    // logarithmic proxy lets higher-order lensing cues become thinner and dimmer.
+    // Near the critical impact parameter, null rays can wind around the hole.
+    // A logarithmic term approximates that rapid growth in path length near the
+    // photon region and fades higher-order features.
     float bc = criticalImpactParam();
     float eps = abs(b - bc) / max(bc, 0.0001);
     return clamp(-log(max(eps, 0.0016)) * 0.46, 0.0, 3.8);
@@ -389,8 +415,9 @@ float photonCriticalWeight(float b, float width) {
 }
 
 float synchrotronTransferWeight(float ne, float thetaE, float bMag, float pitchAngle) {
-    // Lightweight optically thin synchrotron emissivity. It modulates the
-    // cinematic disk instead of replacing it: j_nu ~ ne B^(3/2) exp[-sqrt(nu/nu_c)].
+    // Lightweight optically thin synchrotron emissivity model:
+    // j_nu ~ n_e B^(3/2) exp[-sqrt(nu / nu_c)]. It modulates disk texture using
+    // density, magnetic field strength, electron temperature, and pitch angle.
     float nu = 1.0;
     float nuC = 0.050 + 0.52 * bMag * thetaE * thetaE * pitchAngle;
     float jnu = ne * pow(max(bMag * pitchAngle, 0.001), 1.5) * exp(-sqrt(nu / max(nuC, 0.0001)));
@@ -398,16 +425,16 @@ float synchrotronTransferWeight(float ne, float thetaE, float bMag, float pitchA
 }
 
 float opticalDepthCue(float ne, float thetaE, float bMag) {
-    // A small absorption/optical-depth cue. It prevents every dense lane from
-    // becoming pure glow while keeping the render bright and readable.
+    // Optical-depth cue for absorption. Dense, cooler lanes reduce emission a
+    // little, giving the disk dark structure instead of uniform glow.
     float alpha = ne * sqrt(max(bMag, 0.001)) / (thetaE * thetaE + 0.30);
     return clamp(alpha, 0.0, 1.0);
 }
 
 vec3 advanceNullGeodesic(vec3 pos, vec3 dir, float ds) {
-    // Fast weak-field null-ray step with transverse deflection. It is not a full
-    // Kerr geodesic integrator, but it preserves the geometric rule that gravity
-    // bends the photon direction perpendicular to its current propagation.
+    // Fast weak-field null-ray step. Gravity changes only the transverse part of
+    // the photon direction, which preserves the idea that light is bent sideways
+    // toward the mass rather than accelerated along its own direction.
     float horizon = 0.62;
     float r = length(pos) + 0.0001;
     float b = length(cross(pos, dir)) + 0.0001;
@@ -426,6 +453,7 @@ vec3 advanceNullGeodesic(vec3 pos, vec3 dir, float ds) {
 
     float bend = 0.040 * massScale / (r * r + 0.18);
     bend += 0.044 * photonShell + 0.018 * nearShell + 0.010 * critical / (r + 0.44);
+    bend *= mix(1.0, 1.18, u_science_strength);
 
     vec3 spinAxis = vec3(0.0, 1.0, 0.0);
     vec3 drag = cross(spinAxis, pos);
@@ -433,6 +461,7 @@ vec3 advanceNullGeodesic(vec3 pos, vec3 dir, float ds) {
     float dLen = length(drag);
     vec3 frameDrag = dLen > 0.0001 ? drag / dLen : vec3(0.0);
     float dragAmount = 0.0052 * clamp(u_spin, 0.0, 0.998) * massScale / (r * r + 0.42);
+    dragAmount *= mix(1.0, 1.28, u_science_strength);
 
     return normalize(dir + transverse * bend * ds + frameDrag * dragAmount * ds);
 }
@@ -460,10 +489,9 @@ vec3 sampleDisk(vec3 p, vec3 rd) {
 
     if (r < inner || r > outer) return vec3(0.0);
 
-    // Geometrically thin emitting disk. The old broad vertical corona could stack
-    // into a polar-looking light column. Here the disk remains thin, while a
-    // faint lifted ribbon supplies the curved secondary image expected from
-    // gravitational lensing of the disk behind the black hole.
+    // Geometrically thin emitting disk. The Gaussian vertical profile confines
+    // most light to the disk plane, while a faint lifted ribbon represents the
+    // secondary lensed image of disk material behind the black hole.
     float qDisk = max(r - inner, 0.0);
     float thickness = 0.064 + 0.034 * exp(-1.22 * qDisk) + 0.010 * smoothstep(1.25, 2.8, r);
     float vertical = exp(-(y * y) / (2.0 * thickness * thickness));
@@ -473,7 +501,8 @@ vec3 sampleDisk(vec3 p, vec3 rd) {
     float corona = exp(-abs(y) / (thickness * 1.70)) * exp(-0.95 * qDisk) * 0.050;
     vertical = max(vertical, lensedSkin + corona);
 
-    // Dark central cavity: avoids the unrealistic dusty fog around the hole.
+    // Dark central cavity. Material inside the inner stable region contributes
+    // little visible disk emission, so the black-hole shadow stays clean.
     float cavity = smoothstep(inner, inner + 0.23, r);
     float radial = exp(-1.05 * max(r - inner, 0.0)) * cavity;
 
@@ -489,7 +518,8 @@ vec3 sampleDisk(vec3 p, vec3 rd) {
     float shear = sin(92.0 * r - 16.0 * a - u_time * (3.7 + 1.5 * u_spin));
     float filamentNoise = smoothstep(0.46, 0.92, microDust) * (0.42 + 0.58 * abs(shear));
 
-    // Narrow luminous ring structure: photon-orbit rim + hot inner accretion rings.
+    // Narrow luminous rings emphasize hot inner accretion structure and the
+    // photon-orbit region where lensing strongly concentrates light.
     float ring1 = exp(-pow(r - 0.88, 2.0) / 0.0038);
     float ring2 = exp(-pow(r - 1.08, 2.0) / 0.0070);
     float ring3 = exp(-pow(r - 1.42, 2.0) / 0.0180);
@@ -502,12 +532,14 @@ vec3 sampleDisk(vec3 p, vec3 rd) {
     float streaks = smoothstep(0.20, 1.0, abs(armC)) * filamentNoise;
     float spiral = 0.50 + 0.20 * turbulent + 0.12 * armA + 0.075 * armB + 0.050 * streaks + rings;
 
-    // Absorbing lanes inside the accretion flow, not a visible fog around the hole.
+    // Absorbing lanes inside the accretion flow add cooler, darker texture to the
+    // turbulent disk without filling the central shadow.
     float lane = smoothstep(0.58, 0.94, fineDust) * (0.35 + 0.65 * smoothstep(1.05, 2.2, r));
     spiral *= 1.0 - lane * 0.22;
     spiral += filamentNoise * (1.0 - smoothstep(0.82, 2.9, r)) * 0.18;
 
-    // Tiny star-like hot knots embedded inside bright rings and accretion lanes.
+    // Small hot clumps represent short-lived turbulent density enhancements inside
+    // the disk and inner rings.
     vec2 cell = vec2(a * 34.0 + r * 8.0 - u_time * 0.70, r * 24.0);
     vec2 cid = floor(cell);
     vec2 cf = fract(cell);
@@ -523,9 +555,9 @@ vec3 sampleDisk(vec3 p, vec3 rd) {
     float g = redshiftFactor(orbitalDir, rd, rPhys);
     float doppler = relativisticBeaming(orbitalDir, rd, rPhys);
 
-    // Hidden magnetic/synchrotron layer. It modulates the existing cinematic
-    // brightness, preserving the gold/white look while tying texture to plasma
-    // density, magnetic pitch angle, and redshift.
+    // Magnetic and synchrotron-inspired modulation. The field is mostly toroidal
+    // with a weaker poloidal part, and the pitch angle controls how efficiently
+    // electrons radiate toward the camera.
     float toroidalStrength = 0.88 + 0.10 * clamp(u_spin, 0.0, 0.998);
     float poloidalStrength = 0.13 + 0.09 * smoothstep(0.20, 1.80, qDisk) + 0.025 * sin(2.5 * a + u_time * 0.18);
     vec3 bField = normalize(orbitalDir * toroidalStrength + diskNormal * poloidalStrength + radialDir * (0.045 * (turbulent - 0.5)));
@@ -539,7 +571,9 @@ vec3 sampleDisk(vec3 p, vec3 rd) {
 
     float heat = mix(exp(-0.68 * max(r - inner, 0.0)), tempPhys, 0.18);
     float photonBoost = 1.0 + 0.55 * ring1 + 0.28 * ring2;
-    float physicalMod = synchMod * mix(1.0, redshiftMod, 0.28) * (1.0 - tau * lane * 0.075);
+    float redshiftTransferStrength = mix(0.28, 0.52, u_science_strength);
+    float absorptionStrength = mix(0.075, 0.140, u_science_strength);
+    float physicalMod = synchMod * mix(1.0, redshiftMod, redshiftTransferStrength) * (1.0 - tau * lane * absorptionStrength);
 
     float brightness = vertical * radial * spiral * doppler * heat * photonBoost * physicalMod * u_accretion * 1.22;
     brightness += vertical * clumps * doppler * heat * physicalMod * 1.48 * u_accretion;
@@ -578,9 +612,8 @@ vec3 samplePhotonHalo(vec3 p, vec3 rd) {
 
     if (sphericalR < horizon * 1.02 || r < inner || r > outer) return vec3(0.0);
 
-    // Curved lensed photon ribbon. The previous broad upper sheath behaved like
-    // a vertical polar glow. A physical accretion disk without a jet should instead
-    // show a connected secondary image that bends around the photon region.
+    // Curved lensed photon ribbon. Disk light passing close to the photon region
+    // forms connected arcs around the shadow instead of a separate jet-like beam.
     float equatorialRibbon = exp(-(y * y) / (2.0 * 0.076 * 0.076));
     float arcLift = 0.070 + 0.245 * exp(-pow(r - critical * 1.305, 2.0) / 0.25);
     float arcWidth = 0.045 + 0.018 * smoothstep(horizon * 1.12, horizon * 2.00, r);
@@ -620,9 +653,11 @@ vec3 samplePhotonHalo(vec3 p, vec3 rd) {
 
     float shell = (photon * 1.30 + innerFire * 0.78 + midBand * 0.46 + outerBand * 0.14);
     shell *= 0.94 + 0.14 * criticalWeight;
-    float brightness = vertical * shell * (0.54 + 0.58 * filaments) * doppler * mix(1.0, clamp(pow(g, 3.0), 0.60, 1.75), 0.22) * u_accretion;
+    float haloRedshiftStrength = mix(0.22, 0.42, u_science_strength);
+    float brightness = vertical * shell * (0.54 + 0.58 * filaments) * doppler * mix(1.0, clamp(pow(g, 3.0), 0.60, 1.75), haloRedshiftStrength) * u_accretion;
 
-    // Plasma beads/sparks embedded inside the 3D ring itself.
+    // Small plasma sparks add granular structure to the photon-halo region and
+    // help the ring feel like turbulent emitting material.
     vec2 cell = vec2(a * 78.0 + r * 13.0 - u_time * (1.05 + 0.45 * u_spin), r * 44.0 + y * 8.0);
     vec2 id = floor(cell);
     vec2 f = fract(cell);
@@ -636,8 +671,8 @@ vec3 samplePhotonHalo(vec3 p, vec3 rd) {
     col += vec3(1.0, 0.78, 0.38) * bead * doppler * 1.38 * u_accretion;
     col += vec3(1.0, 0.31, 0.08) * outerBand * vertical * filaments * 0.095 * doppler * u_accretion;
 
-    // Clean central cavity so the shadow remains black and the ring reads as
-    // surrounding the horizon instead of filling it.
+    // The central attenuation keeps the shadow dark, making the bright ring read
+    // as surrounding the horizon rather than filling it.
     col *= smoothstep(horizon * 1.04, horizon * 1.34, sphericalR);
     return col;
 }
@@ -671,19 +706,19 @@ vec3 sampleLensRim(vec3 ro, vec3 rd, vec2 p, float closestImpact) {
     float innerFire = exp(-pow(closestImpact - critical * 1.085, 2.0) / 0.0110);
     float outerArc = exp(-pow(closestImpact - critical * 1.373, 2.0) / 0.0500) * exp(-0.18 * winding);
 
-    // Unlike the old p.y mask, this modulation is derived from the ray's
-    // closest world-space pass around the hole and the disk frame.
+    // Rim brightness is based on the ray's closest world-space pass around the
+    // hole and its position in the disk frame.
     float diskFrameGate = smoothstep(0.02, 0.62, abs(x)) * (0.72 + 0.28 * smoothstep(-0.35, 0.35, y * diskSide));
-    float asym = 1.0 + 0.36 * tanh(-x * 1.4 + u_spin * 0.45);
+    float asymStrength = mix(0.36, 0.48, u_science_strength);
+    float asym = 1.0 + asymStrength * tanh(-x * 1.4 + u_spin * 0.45);
 
     vec3 col = vec3(0.0);
     col += vec3(1.0, 0.94, 0.76) * rim * (0.84 + 0.16 * broken) * 0.34 * u_accretion;
     col += vec3(1.0, 0.66, 0.25) * innerFire * (0.055 + 0.090 * broken) * diskFrameGate * asym * u_accretion;
     col += vec3(1.0, 0.40, 0.11) * outerArc * broken * diskFrameGate * asym * 0.058 * u_accretion;
 
-    // A controlled upper lensed arc: connected to the same impact-parameter ring
-    // and lifted only slightly above the disk plane, so it curves around the hole
-    // instead of rising as two independent vertical curtains.
+    // The upper lensed arc is tied to the same impact-parameter ring and is only
+    // slightly lifted from the disk plane, so it remains connected to the shadow.
     float liftedCenter = 0.090 + 0.080 * exp(-pow(closestImpact - critical * 1.203, 2.0) / 0.038);
     float upperArcTrack = exp(-pow(y - liftedCenter, 2.0) / (2.0 * 0.070 * 0.070));
     float connectedArc = upperArcTrack * exp(-pow(closestImpact - critical * 1.220, 2.0) / 0.030)
@@ -710,20 +745,24 @@ vec3 scienceCalibrationOverlay(vec3 col, vec2 p, float impactScreen, float impac
     float horizon = 0.62;
     float critical = criticalImpactParam();
     float inner = sceneDiskInnerRadius(horizon);
-    float iscoMark = exp(-pow(impactScreen - inner, 2.0) / 0.0035);
-    float horizonMark = exp(-pow(impactScreen - horizon, 2.0) / 0.0025);
-    float photonMark = exp(-pow(impactScreen - critical, 2.0) / 0.0028);
-    float pathMark = exp(-pow(impactPath - critical, 2.0) / 0.010);
+
+    // Thin diagnostic guide curves. They are annotation markers for ISCO,
+    // horizon scale, photon critical curve, and closest ray approach; they are
+    // not treated as glowing physical plasma.
+    float iscoMark = exp(-pow(impactScreen - inner, 2.0) / 0.0012);
+    float horizonMark = exp(-pow(impactScreen - horizon, 2.0) / 0.0010);
+    float photonMark = exp(-pow(impactScreen - critical, 2.0) / 0.0011);
+    float pathMark = exp(-pow(impactPath - critical, 2.0) / 0.0035);
 
     vec3 overlay = vec3(0.0);
-    overlay += vec3(0.18, 0.62, 1.0) * iscoMark * 0.52;       // ISCO guide
-    overlay += vec3(1.0, 0.24, 0.12) * horizonMark * 0.42;    // horizon scale
-    overlay += vec3(0.95, 0.84, 0.34) * photonMark * 0.68;    // photon critical curve
-    overlay += vec3(0.28, 1.0, 0.66) * pathMark * 0.18;       // bent-path closest approach
+    overlay += vec3(0.18, 0.62, 1.0) * iscoMark * 0.22;       // ISCO guide
+    overlay += vec3(1.0, 0.24, 0.12) * horizonMark * 0.18;    // horizon scale
+    overlay += vec3(0.95, 0.84, 0.34) * photonMark * 0.30;    // photon critical curve
+    overlay += vec3(0.28, 1.0, 0.66) * pathMark * 0.07;       // bent-path closest approach
 
     float stripe = smoothstep(0.48, 0.54, fract((p.y + 1.0) * 18.0));
-    overlay *= 0.72 + 0.28 * stripe;
-    return mix(col, col + overlay, 0.86);
+    overlay *= 0.82 + 0.18 * stripe;
+    return mix(col, clamp(col + overlay, 0.0, 1.0), 0.52);
 }
 
 
@@ -768,8 +807,8 @@ void main() {
         emission += ringCol * 0.086 * (1.0 - opacity * 0.62);
         opacity += localPower * 0.0080 * (1.0 - opacity);
 
-        // The grid is diagnostic: let it survive moderate opacity so it remains
-        // visible around the well without washing over the brightest disk core.
+        // The grid is an explanatory guide, so it remains visible through moderate
+        // opacity while staying weaker than the bright accretion emission.
         emission += gridCol * 0.066 * (1.0 - opacity * 0.30);
 
         rayDir = advanceNullGeodesic(rayPos, rayDir, stepSize);
@@ -784,43 +823,41 @@ void main() {
     float physicalClosestImpact = min(closestImpact, pathMinImpact);
     float criticalImpact = criticalImpactParam();
 
-    // Strong gravity clears diffuse haze near the shadow. Point stars remain visible
-    // because the attenuation is not a hard black overlay; it mainly suppresses fog.
+    // Near the shadow, gravitational absorption suppresses diffuse background
+    // light while still allowing compact stars to appear through the lensing field.
     float shadowHalo = exp(-pow(closestImpact - horizon * 1.28, 2.0) / 0.19);
     float deepShadow = exp(-pow(closestImpact - horizon * 0.82, 2.0) / 0.035);
 
     if (!absorbed) {
-        vec3 bg = starfield(rayDir) * 1.15;
-        // Stronger photon-sphere attenuation makes stars visually wrap into arcs
-        // instead of reading as a flat backdrop pasted behind the hole.
+        vec3 bg = starfield(rayDir) * 1.95;
+        // Photon-sphere attenuation dims background stars near the critical region,
+        // helping the lensed star field curve around the black hole.
         bg *= 1.0 - shadowHalo * 0.20;
         bg *= 1.0 - deepShadow * 0.64;
         col += bg * (1.0 - opacity);
     }
 
-    // Thin lensing rim, tied to the ray's closest world-space pass around the hole.
-    // The detailed glowing structure itself is emitted by samplePhotonHalo() inside
-    // the ray march, so it remains spatially attached to the black hole.
+    // Thin lensing rim tied to the ray's closest pass around the hole. The richer
+    // 3D emission is handled during ray marching, while this adds a crisp edge cue.
     col += sampleLensRim(ro, rd, p, closestImpact);
 
-    // Final gravitational darkness. Keep it local, otherwise the whole scene becomes muddy.
+    // Final local shadow shaping. The attenuation is kept near the hole so the
+    // rest of the star field and disk remain clear.
     float bowl = exp(-pow(closestImpact - horizon * 1.20, 2.0) / 0.050);
     float ringProtect = exp(-pow(closestImpact - criticalImpact, 2.0) / 0.0080);
     col *= 1.0 - bowl * 0.34 * (1.0 - ringProtect * 0.72);
 
     if (absorbed) {
-        // No background is added after absorption; keep accumulated foreground
-        // ring/disk emission so front-side plasma can cross the silhouette naturally.
+        // Once a ray falls inside the horizon, no background light is added. Any
+        // already accumulated foreground disk or ring emission is kept.
         col *= 0.88;
     }
-
-    col = scienceCalibrationOverlay(col, p, closestImpact, physicalClosestImpact);
 
     float vignette = smoothstep(1.68, 0.18, length(p));
     col *= mix(0.48, 1.0, vignette);
 
-    // Cheap HDR-style local glow. True multipass bloom is better, but this single-pass
-    // bloom shoulder gives a brighter white-hot core without tanking frame rate.
+    // Single-pass bloom approximation. Bright values above the white-hot threshold
+    // add a soft glow, giving the disk an HDR feel without a multipass post-process.
     float preLuma = dot(col, vec3(0.2126, 0.7152, 0.0722));
     vec3 hotBloom = max(col - vec3(0.92), vec3(0.0));
     col += hotBloom * (0.115 + 0.145 * u_bloom);
@@ -832,209 +869,16 @@ void main() {
     col = (col - 0.5) * u_contrast + 0.5;
     col = clamp(col, 0.0, 1.0);
 
+    // Apply diagnostic guides after tone mapping so the overlay behaves like a
+    // screen annotation rather than a source of physical light.
+    col = scienceCalibrationOverlay(col, p, closestImpact, physicalClosestImpact);
+
     fragColor = vec4(col, 1.0);
 }
 
 """
 
 
-
-
-def create_generated_milky_way(path: Path, width: int = 4096, height: int = 2048) -> None:
-    """Create a lightweight equirectangular sky texture used as a fallback asset.
-
-    Replace this PNG with a real 4K/8K public-domain Milky Way panorama for an even
-    more photographic web-demo look. The shader treats the texture as distant light
-    and gravitationally bends it around the black hole.
-    """
-    if path.exists():
-        return
-
-    rng = np.random.default_rng(42)
-    yy, xx = np.mgrid[0:height, 0:width]
-    u = xx / width
-    v = yy / height
-
-    angle = -0.23
-    x = (u - 0.5) * 2.0
-    y = (v - 0.5) * 2.0
-    band_y = np.sin(angle) * x + np.cos(angle) * y + 0.08 * np.sin(2.0 * np.pi * (u * 1.15 + 0.07))
-    band_x = np.cos(angle) * x - np.sin(angle) * y
-
-    plane = np.exp(-(np.abs(band_y) * 3.5) ** 2)
-    thin = np.exp(-(np.abs(band_y) * 12.0) ** 1.6)
-    core = np.exp(-((band_x + 0.34) ** 2 * 3.2 + band_y ** 2 * 48.0))
-
-    def upsample_noise(low_h: int, low_w: int) -> np.ndarray:
-        small = (rng.random((low_h, low_w)) * 255).astype(np.uint8)
-        im = Image.fromarray(small, mode="L").resize((width, height), Image.Resampling.BICUBIC)
-        return np.asarray(im).astype(np.float32) / 255.0
-
-    n1 = sum(upsample_noise(max(8, height // s), max(16, width // s)) * a for s, a in [(96, 1.0), (48, 0.55), (24, 0.30), (12, 0.16)]) / 2.01
-    n2 = sum(upsample_noise(max(8, height // s), max(16, width // s)) * a for s, a in [(64, 1.0), (32, 0.55), (16, 0.30)]) / 1.85
-
-    lanes = np.clip((n2 - 0.48) * 4.0, 0.0, 1.0) * plane
-    dust = plane * (0.30 + 0.70 * n1)
-
-    img = np.zeros((height, width, 3), dtype=np.float32)
-    img += np.array([0.010, 0.013, 0.025], dtype=np.float32)
-    img += dust[..., None] * np.array([0.045, 0.060, 0.120], dtype=np.float32)
-    img += thin[..., None] * (0.40 + 0.60 * n1[..., None]) * np.array([0.30, 0.17, 0.075], dtype=np.float32)
-    img += core[..., None] * np.array([1.10, 0.65, 0.28], dtype=np.float32)
-    img *= (1.0 - 0.62 * lanes[..., None])
-
-    star_count = 28000
-    sx = rng.integers(0, width, star_count)
-    sy = rng.integers(0, height, star_count)
-    local_plane = plane[sy, sx]
-    keep = rng.random(star_count) < (0.23 + 0.77 * local_plane)
-    sx, sy, local_plane = sx[keep], sy[keep], local_plane[keep]
-    temps = rng.random(len(sx))
-    colors = np.stack([
-        0.65 + 0.45 * temps,
-        0.72 + 0.25 * (1.0 - np.abs(temps - 0.5) * 2.0),
-        0.88 + 0.22 * (1.0 - temps),
-    ], axis=1)
-    bright = (0.16 + rng.random(len(sx)) ** 5 * 2.9) * (0.55 + 1.65 * local_plane)
-    np.add.at(img, (sy, sx), colors * bright[:, None])
-
-    big = bright > 1.1
-    for px, py, col, b in zip(sx[big], sy[big], colors[big], bright[big]):
-        if 1 <= px < width - 1 and 1 <= py < height - 1:
-            img[py-1:py+2, px-1:px+2] += col * b * 0.08
-
-    for _ in range(46):
-        gx = int(rng.integers(80, width - 80))
-        gy = int(rng.integers(80, height - 80))
-        radx = int(rng.integers(10, 38))
-        rady = int(rng.integers(2, 9))
-        tint = np.array([1.0, 0.72, 0.42]) if rng.random() < 0.55 else np.array([0.55, 0.68, 1.0])
-        xs = np.arange(gx - radx * 2, gx + radx * 2)
-        ys = np.arange(gy - radx * 2, gy + radx * 2)
-        X, Y = np.meshgrid(xs, ys)
-        a = rng.random() * np.pi
-        qx = np.cos(a) * (X - gx) - np.sin(a) * (Y - gy)
-        qy = np.sin(a) * (X - gx) + np.cos(a) * (Y - gy)
-        mask = np.exp(-(qx ** 2 / (2 * radx ** 2) + qy ** 2 / (2 * rady ** 2)))
-        vx = (xs >= 0) & (xs < width)
-        vy = (ys >= 0) & (ys < height)
-        img[ys[vy][:, None], xs[vx][None, :]] += mask[vy][:, vx][..., None] * tint * 0.22
-
-    img = 1.0 - np.exp(-img * 1.22)
-    img = np.clip(img ** (1.0 / 2.2), 0.0, 1.0)
-    Image.fromarray((img * 255).astype(np.uint8), mode="RGB").save(path)
-
-
-def find_sky_texture() -> Path:
-    """Pick the best available equirectangular sky map next to the script."""
-    root = Path(__file__).resolve().parent
-    for name in SKY_TEXTURE_CANDIDATES:
-        candidate = root / name
-        if candidate.exists() and candidate.stat().st_size > 1024:
-            return candidate
-
-    # Be forgiving about NASA/browser names.
-    for pattern in ("starmap_2020_16k_gal*", "*16k*gal*", "*milky*way*", "*.exr", "*.png", "*.jpg"):
-        matches = sorted(root.glob(pattern), key=lambda p: p.stat().st_size if p.exists() else 0, reverse=True)
-        if matches:
-            return matches[0]
-
-    return FALLBACK_SKY_PATH
-
-
-def _array_to_pil_rgb(arr: np.ndarray) -> Image.Image:
-    """Convert HDR/float or integer image arrays into a display-ready RGB panorama."""
-    arr = np.asarray(arr)
-    if arr.ndim == 2:
-        arr = np.repeat(arr[..., None], 3, axis=2)
-    if arr.ndim == 3 and arr.shape[2] > 3:
-        arr = arr[..., :3]
-
-    arr = arr.astype(np.float32, copy=False)
-    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
-
-    if arr.max(initial=0.0) > 255.0 or arr.dtype.kind == "f":
-        # NASA EXR maps are HDR/linear. Robust percentile exposure keeps the galactic
-        # core bright without crushing faint star detail.
-        positive = arr[arr > 0.0]
-        if positive.size:
-            white = float(np.percentile(positive, 99.72))
-        else:
-            white = 1.0
-        white = max(white, 1e-6)
-        arr = np.clip(arr / white, 0.0, 24.0)
-        arr = 1.0 - np.exp(-arr * 1.35)
-        arr = np.clip(arr, 0.0, 1.0) ** (1.0 / 2.2)
-        arr = arr * 255.0
-    else:
-        arr = np.clip(arr, 0.0, 255.0)
-
-    return Image.fromarray(arr.astype(np.uint8), mode="RGB")
-
-
-def _load_exr_or_hdr_image(path: Path) -> Image.Image:
-    """Load EXR/HDR with optional backends, then convert it to an RGB PIL image."""
-    errors = []
-
-    try:
-        import imageio.v3 as iio
-        return _array_to_pil_rgb(iio.imread(path))
-    except Exception as exc:
-        errors.append(f"imageio: {exc}")
-
-    try:
-        import os
-        os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
-        import cv2
-        arr = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-        if arr is None:
-            raise RuntimeError("cv2.imread returned None")
-        if arr.ndim == 3:
-            arr = arr[..., ::-1]
-        return _array_to_pil_rgb(arr)
-    except Exception as exc:
-        errors.append(f"opencv: {exc}")
-
-    raise RuntimeError(
-        "Could not read the EXR sky map. Install imageio/opencv-python, or convert the NASA EXR to PNG/JPG first. "
-        "Example: magick starmap_2020_16k_gal.exr starmap_2020_16k_gal.png. "
-        + " | ".join(errors)
-    )
-
-
-def load_quality_sky_surface(path: Path) -> pygame.Surface:
-    """Load a NASA 16K/8K/4K equirectangular sky map with GPU-friendly preprocessing."""
-    suffixes = "".join(path.suffixes).lower()
-
-    if path.name.endswith(".opdownload"):
-        print("Warning: using a .opdownload file. If loading fails, wait for the download to finish and rename it to .exr.")
-
-    if ".exr" in suffixes or ".hdr" in suffixes:
-        image = _load_exr_or_hdr_image(path)
-    else:
-        image = Image.open(path).convert("RGB")
-
-    # Keep aspect ratio and avoid huge VRAM usage from full 16K uploads.
-    w, h = image.size
-    max_w, max_h = SKY_MAX_UPLOAD_SIZE
-    min_w, min_h = SKY_MIN_RUNTIME_SIZE
-    scale_down = min(max_w / w, max_h / h, 1.0)
-    scale_up = max(min_w / w, min_h / h, 1.0) if (w < min_w or h < min_h) else 1.0
-    scale = scale_down if scale_down < 1.0 else scale_up
-
-    if scale != 1.0:
-        new_size = (max(1, int(round(w * scale))), max(1, int(round(h * scale))))
-        image = image.resize(new_size, Image.Resampling.LANCZOS)
-
-    from PIL import ImageEnhance, ImageFilter
-    image = ImageEnhance.Brightness(image).enhance(0.88)
-    image = ImageEnhance.Contrast(image).enhance(0.94)
-    image = ImageEnhance.Sharpness(image).enhance(0.86)
-    image = image.filter(ImageFilter.GaussianBlur(radius=0.12))
-
-    print(f"Loaded sky texture: {path.name} -> {image.size[0]}x{image.size[1]} GPU upload")
-    data = image.tobytes("raw", "RGB")
-    return pygame.image.frombuffer(data, image.size, "RGB").copy()
 
 
 @dataclass
@@ -1055,7 +899,12 @@ class State:
     show_particles: bool = True
     cinematic: bool = False
     science_overlay: bool = False
+    science_strength: float = 0.0
+    star_detail: float = 0.68
     show_ui: bool = True
+
+    status_message: str = ""
+    status_until_ms: int = 0
 
     exposure: float = 1.30
     bloom: float = 1.55
@@ -1087,6 +936,119 @@ def kerr_isco_radius(spin: float) -> float:
 
 def draw_text(screen, font, txt, x, y, color=(235, 235, 235)):
     screen.blit(font.render(txt, True, color), (x, y))
+
+
+def science_mode_label(value: float) -> str:
+    if value < 0.10:
+        return "Cinematic"
+    if value < 0.55:
+        return "Balanced"
+    return "Science"
+
+
+def science_mode_slug(value: float) -> str:
+    return science_mode_label(value).lower().replace(" ", "_")
+
+
+def set_status(state, message: str, seconds: float = 3.5) -> None:
+    state.status_message = message
+    state.status_until_ms = pygame.time.get_ticks() + int(seconds * 1000)
+
+
+def export_dir() -> Path:
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    return EXPORT_DIR
+
+
+def export_stem(state, prefix: str, include_ui: bool | None = None) -> str:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    mode = science_mode_slug(state.science_strength)
+    overlay = "overlay" if state.science_overlay else "clean"
+    if include_ui is None:
+        ui = "ui" if state.show_ui else "no_ui"
+    else:
+        ui = "ui" if include_ui else "no_ui"
+    return f"{prefix}_{stamp}_{mode}_{overlay}_{ui}"
+
+
+def state_report_lines(state, sim_time: float, fps: float) -> list[str]:
+    return [
+        "Real-Time Black Hole Simulator export",
+        f"mode_label: {science_mode_label(state.science_strength)}",
+        f"science_strength: {state.science_strength:.3f}",
+        f"star_detail: {state.star_detail:.3f}",
+        f"science_overlay: {state.science_overlay}",
+        f"mass_M_sun: {state.mass:.4f}",
+        f"spin_a: {state.spin:.4f}",
+        f"accretion_rate: {state.accretion:.4f}",
+        f"time_scale: {state.time_scale:.4f}",
+        f"sim_time_s: {sim_time:.4f}",
+        f"fps_readout: {fps:.3f}",
+        f"camera_yaw_rad: {state.yaw:.6f}",
+        f"camera_pitch_rad: {state.pitch:.6f}",
+        f"camera_distance: {state.distance:.6f}",
+        f"show_disk: {state.show_disk}",
+        f"show_ring: {state.show_ring}",
+        f"show_grid: {state.show_grid}",
+        f"show_stars: {state.show_stars}",
+        f"show_particles: {state.show_particles}",
+        f"show_ui: {state.show_ui}",
+        f"exposure: {state.exposure:.4f}",
+        f"bloom: {state.bloom:.4f}",
+        f"contrast: {state.contrast:.4f}",
+        f"saturation: {state.saturation:.4f}",
+    ]
+
+
+def save_framebuffer(ctx, state, sim_time: float, fps: float, include_ui: bool) -> Path:
+    path = export_dir() / f"{export_stem(state, 'blackhole_screenshot', include_ui)}.png"
+    ctx.finish()
+    data = ctx.screen.read(components=3, alignment=1)
+    surface = pygame.image.frombuffer(data, (WIDTH, HEIGHT), "RGB").copy()
+    surface = pygame.transform.flip(surface, False, True)
+    pygame.image.save(surface, str(path))
+
+    note = "UI included" if include_ui else "clean render without UI"
+    sidecar = path.with_suffix(".txt")
+    sidecar.write_text("\n".join(state_report_lines(state, sim_time, fps) + [f"capture_note: {note}"]) + "\n")
+    return path
+
+
+def write_benchmark_report(state, frame_ms_samples: list[float], sim_time: float) -> Path:
+    safe_samples = [max(float(v), 0.001) for v in frame_ms_samples if v is not None]
+    if not safe_samples:
+        safe_samples = [0.001]
+
+    avg_ms = sum(safe_samples) / len(safe_samples)
+    min_ms = min(safe_samples)
+    max_ms = max(safe_samples)
+    avg_fps = 1000.0 / avg_ms
+    max_fps = 1000.0 / min_ms
+    min_fps = 1000.0 / max_ms
+
+    stem = export_stem(state, "benchmark", include_ui=state.show_ui)
+    report_path = export_dir() / f"{stem}.txt"
+    csv_path = report_path.with_suffix(".csv")
+
+    lines = [
+        "Real-Time Black Hole Simulator benchmark",
+        f"frames: {len(safe_samples)}",
+        f"avg_frame_ms: {avg_ms:.3f}",
+        f"min_frame_ms: {min_ms:.3f}",
+        f"max_frame_ms: {max_ms:.3f}",
+        f"avg_fps: {avg_fps:.3f}",
+        f"min_fps: {min_fps:.3f}",
+        f"max_fps: {max_fps:.3f}",
+        "",
+        *state_report_lines(state, sim_time, avg_fps),
+    ]
+    report_path.write_text("\n".join(lines) + "\n")
+
+    csv_lines = ["frame,frame_ms,instant_fps"]
+    for i, ms in enumerate(safe_samples, start=1):
+        csv_lines.append(f"{i},{ms:.6f},{1000.0 / ms:.6f}")
+    csv_path.write_text("\n".join(csv_lines) + "\n")
+    return report_path
 
 
 UI_TITLE = (238, 238, 238)
@@ -1158,7 +1120,7 @@ def draw_ui(screen, font, small_font, state, fps, sim_time):
     if not state.show_ui:
         return
 
-    # Left side: second-reference style compact translucent panels.
+    # Left-side panels show simulation state and camera controls in a compact form.
     draw_panel(screen, (LEFT_X, 52, 220, 178), "Simulation Info")
     frame_ms = 1000.0 / max(fps, 1.0)
     rows = [
@@ -1179,29 +1141,41 @@ def draw_ui(screen, font, small_font, state, fps, sim_time):
     ]
     draw_status_table(screen, font, LEFT_X + 14, 292, rows, 92, 25)
 
-    draw_panel(screen, (LEFT_X, 412, 220, 360), "Controls")
+    draw_panel(screen, (LEFT_X, 412, 220, 438), "Controls")
     controls = [
-        ("Mouse Drag", "Orbit"),
+        ("Mouse", "Orbit"),
         ("Scroll", "Zoom"),
-        ("A / D", "Orbit Left/Right"),
-        ("Q / E", "Orbit Up/Down"),
-        ("W / S", "Move Closer/Farther"),
-        ("V / F", "Increase/Decrease Spin"),
-        ("Z / X", "Decrease/Increase Mass"),
-        ("T / Y", "Decrease/Increase Accretion"),
-        ("G", "Toggle Grid"),
-        ("C", "Science Overlay"),
-        ("H", "Hide UI"),
+        ("A / D", "Orbit L/R"),
+        ("Q / E", "Orbit U/D"),
+        ("W / S", "Near/Far"),
+        ("V / F", "Spin +/-"),
+        ("Z / X", "Mass -/+"),
+        ("T / Y", "Accretion -/+"),
+        ("N / M", "Science -/+"),
+        ("J / K", "Stars -/+"),
+        ("1", "Cinematic"),
+        ("2", "Balanced"),
+        ("3", "Strong physics"),
+        ("4", "Diagnostic"),
+        ("5 / 6", "Demo face/close"),
+        ("7", "Explain physics"),
+        ("8", "Cinematic export"),
+        ("P", "Screenshot"),
+        ("O", "Clean screenshot"),
+        ("B", "Benchmark"),
+        ("G", "Grid"),
+        ("C", "Overlay"),
+        ("H", "UI"),
         ("R", "Reset"),
         ("ESC", "Quit"),
     ]
-    y = 458
+    y = 454
     for k, v in controls:
-        draw_text(screen, font, k, LEFT_X + 14, y, UI_TEXT)
-        draw_text(screen, small_font, v, LEFT_X + 100, y + 1, UI_TEXT)
-        y += 25
+        draw_text(screen, small_font, k, LEFT_X + 14, y, UI_TEXT)
+        draw_text(screen, small_font, v, LEFT_X + 78, y, UI_TEXT)
+        y += 15
 
-    # Right side: second-reference layout and neutral controls.
+    # Right-side panels hold visibility toggles, physical parameters, and presets.
     draw_panel(screen, (RIGHT_X, 52, PANEL_W, 242), "Visualization")
     items = [
         ("show_disk", "Accretion Disk", state.show_disk),
@@ -1212,34 +1186,54 @@ def draw_ui(screen, font, small_font, state, fps, sim_time):
     ]
     for i, (_, label, val) in enumerate(items):
         draw_checkbox(screen, font, label, val, CHECK_X, 96 + i * 28)
-    draw_text(screen, font, "Color Map", SLIDER_X, 242, UI_TEXT)
+    draw_text(screen, font, "Sky Mode", SLIDER_X, 242, UI_TEXT)
     pygame.draw.rect(screen, (38, 38, 40), (SLIDER_X, 264, SLIDER_W, 30), border_radius=5)
     pygame.draw.rect(screen, (105, 108, 116, 72), (SLIDER_X, 264, SLIDER_W, 30), 1, border_radius=5)
-    draw_text(screen, font, "Realistic", SLIDER_X + 10, 271, UI_TEXT)
+    draw_text(screen, font, "Procedural Stars", SLIDER_X + 10, 271, UI_TEXT)
     draw_text(screen, font, "v", SLIDER_X + SLIDER_W - 20, 270, UI_TEXT)
 
-    draw_panel(screen, (RIGHT_X, 310, PANEL_W, 292), "Parameters")
+    draw_panel(screen, (RIGHT_X, 310, PANEL_W, 384), "Parameters")
     draw_slider(screen, font, "BH Mass (M_sun)", state.mass, SLIDER_X, 354, 4.0, 20.0, SLIDER_W)
     draw_slider(screen, font, "Spin (a)", state.spin, SLIDER_X, 406, 0.0, 1.0, SLIDER_W)
     draw_slider(screen, font, "Accretion Rate", state.accretion, SLIDER_X, 458, 0.0, 1.5, SLIDER_W)
     draw_slider(screen, font, "Time Scale", state.time_scale, SLIDER_X, 510, 0.1, 3.0, SLIDER_W)
-    draw_button(screen, font, "Reset to Default", (SLIDER_X, 560, SLIDER_W, 30))
+    draw_slider(screen, font, "Science Strength", state.science_strength, SLIDER_X, 562, 0.0, 1.0, SLIDER_W)
+    draw_slider(screen, font, "Star Detail", state.star_detail, SLIDER_X, 614, 0.0, 1.0, SLIDER_W)
+    draw_button(screen, font, "Reset to Default", (SLIDER_X, 664, SLIDER_W, 30))
 
-    draw_panel(screen, (RIGHT_X, 618, PANEL_W, 206), "Camera Presets")
+    draw_panel(screen, (RIGHT_X, 708, PANEL_W, 154), "Camera Presets")
     buttons = [
-        ("Face On", 656),
-        ("Edge On", 690),
-        ("Top Down", 724),
-        ("Close Up", 758),
-        ("Far View", 792),
+        ("Face On", 744),
+        ("Edge On", 768),
+        ("Top Down", 792),
+        ("Close Up", 816),
+        ("Far View", 840),
     ]
     for label, by in buttons:
-        draw_button(screen, font, label, (SLIDER_X, by, SLIDER_W, 28))
+        draw_button(screen, font, label, (SLIDER_X, by, SLIDER_W, 22))
 
-    # Second-reference-style unobtrusive time readout.
+    # Bottom readout keeps simulation time, science mode, star detail, and status visible.
     draw_text(screen, font, f"Time: {sim_time:5.1f} s", 14, HEIGHT - 28, UI_TEXT)
+    draw_text(
+        screen,
+        font,
+        f"Science: {state.science_strength:.2f} ({science_mode_label(state.science_strength)})",
+        180,
+        HEIGHT - 28,
+        UI_MUTED,
+    )
+    draw_text(screen, font, f"Stars: {state.star_detail:.2f}", 390, HEIGHT - 28, UI_MUTED)
     if state.science_overlay:
-        draw_text(screen, font, "Science calibration overlay: ISCO / horizon / photon critical curve", 180, HEIGHT - 28, UI_MUTED)
+        draw_text(
+            screen,
+            font,
+            "Diagnostic overlay: ISCO / horizon / photon critical curve",
+            510,
+            HEIGHT - 28,
+            UI_MUTED,
+        )
+    if state.status_message:
+        draw_text(screen, small_font, state.status_message[:92], 510, HEIGHT - 50, UI_MUTED)
 
 def reset(state):
     state.mass = 9.87
@@ -1249,10 +1243,35 @@ def reset(state):
     state.yaw = 0.0
     state.pitch = 0.16
     state.distance = 5.8
+    state.show_disk = True
+    state.show_ring = True
+    state.show_grid = True
+    state.show_stars = True
+    state.show_particles = True
+    state.show_ui = True
     state.exposure = 1.30
     state.bloom = 1.55
     state.contrast = 1.06
     state.saturation = 0.94
+    state.science_strength = 0.0
+    state.star_detail = 0.68
+    state.science_overlay = False
+
+
+def set_science_preset(state, name):
+    if name == "cinematic":
+        state.science_strength = 0.0
+        state.science_overlay = False
+    elif name == "balanced":
+        state.science_strength = 0.35
+        state.science_overlay = False
+    elif name == "science":
+        state.science_strength = 0.75
+        state.science_overlay = False
+    elif name == "diagnostic":
+        state.science_strength = 0.75
+        state.science_overlay = True
+        state.show_ui = True
 
 
 def set_camera_preset(state, name):
@@ -1275,12 +1294,47 @@ def set_camera_preset(state, name):
         state.distance = 7.6
 
 
+def apply_public_demo_preset(state, camera_name: str = "Face On") -> None:
+    # Public-demo preset: stable physical parameters, UI visible, and overlay hidden.
+    reset(state)
+    set_science_preset(state, "balanced")
+    set_camera_preset(state, camera_name)
+    state.show_ui = True
+    state.star_detail = 0.72
+    state.science_overlay = False
+
+
+def apply_physics_explanation_preset(state) -> None:
+    # Physics-explanation preset: diagnostic guides are visible and the UI stays on.
+    reset(state)
+    set_science_preset(state, "diagnostic")
+    set_camera_preset(state, "Face On")
+    state.show_ui = True
+    state.star_detail = 0.68
+
+
+def apply_cinematic_output_preset(state) -> None:
+    # Cinematic-output preset: hide the UI, keep particles active, and preserve the
+    # user's current grid choice.
+    keep_grid = state.show_grid
+    reset(state)
+    set_science_preset(state, "balanced")
+    set_camera_preset(state, "Close Up")
+    state.show_ui = False
+    state.science_overlay = False
+    state.show_particles = True
+    state.star_detail = 0.78
+    state.show_grid = keep_grid
+
+
 def set_slider(state, name, mx):
     table = {
         "mass": (SLIDER_X, SLIDER_W, 4.0, 20.0),
         "spin": (SLIDER_X, SLIDER_W, 0.0, 1.0),
         "accretion": (SLIDER_X, SLIDER_W, 0.0, 1.5),
         "time_scale": (SLIDER_X, SLIDER_W, 0.1, 3.0),
+        "science_strength": (SLIDER_X, SLIDER_W, 0.0, 1.0),
+        "star_detail": (SLIDER_X, SLIDER_W, 0.0, 1.0),
     }
 
     sx, sw, mn, mxv = table[name]
@@ -1309,6 +1363,8 @@ def handle_click(state, pos):
         ("spin", SLIDER_X, 436),
         ("accretion", SLIDER_X, 488),
         ("time_scale", SLIDER_X, 540),
+        ("science_strength", SLIDER_X, 592),
+        ("star_detail", SLIDER_X, 644),
     ]
 
     for name, sx, sy in sliders:
@@ -1317,23 +1373,23 @@ def handle_click(state, pos):
             set_slider(state, name, x)
             return
 
-    if SLIDER_X <= x <= SLIDER_X + SLIDER_W and 560 <= y <= 590:
+    if SLIDER_X <= x <= SLIDER_X + SLIDER_W and 664 <= y <= 694:
         reset(state)
         return
 
     presets = [
-        ("Face On", 656),
-        ("Edge On", 690),
-        ("Top Down", 724),
-        ("Close Up", 758),
-        ("Far View", 792),
+        ("Face On", 744),
+        ("Edge On", 768),
+        ("Top Down", 792),
+        ("Close Up", 816),
+        ("Far View", 840),
     ]
     for name, by in presets:
-        if SLIDER_X <= x <= SLIDER_X + SLIDER_W and by <= y <= by + 28:
+        if SLIDER_X <= x <= SLIDER_X + SLIDER_W and by <= y <= by + 22:
             set_camera_preset(state, name)
             return
 
-    # Prevent accidental orbit drag when interacting with side panels.
+    # Ignore orbit dragging when the mouse is over the side-control panels.
     if x < 260 or x > 1284:
         return
     state.dragging = True
@@ -1341,14 +1397,8 @@ def handle_click(state, pos):
 def main():
     pygame.init()
 
-    # Load and downscale/cache the large NASA sky map before creating the OpenGL window.
-    # This prevents the user-facing window from sitting as a black rectangle while a
-    # 16K EXR is decoded. Watch the terminal for the "Loaded sky texture" message.
-    sky_path = find_sky_texture()
-    if sky_path == FALLBACK_SKY_PATH and not sky_path.exists():
-        create_generated_milky_way(sky_path)
-    sky_surface = load_quality_sky_surface(sky_path)
-
+    # The sky is generated procedurally in the shader, so startup does not depend
+    # on loading a large external panorama.
     pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 3)
     pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MINOR_VERSION, 3)
     pygame.display.gl_set_attribute(
@@ -1357,22 +1407,12 @@ def main():
     )
 
     pygame.display.set_mode((WIDTH, HEIGHT), pygame.OPENGL | pygame.DOUBLEBUF)
-    pygame.display.set_caption("Real-Time Black Hole Simulator")
+    pygame.display.set_caption("Real-Time Black Hole Simulator - Star-Only Repo Version")
 
     ctx = moderngl.create_context()
     ctx.disable(moderngl.DEPTH_TEST)
 
     program = ctx.program(vertex_shader=VERTEX_SHADER, fragment_shader=FRAGMENT_SHADER)
-
-    sky_texture = ctx.texture(sky_surface.get_size(), 3, pygame.image.tostring(sky_surface, "RGB", True))
-    sky_texture.repeat_x = True
-    sky_texture.repeat_y = False
-    sky_texture.build_mipmaps()
-    sky_texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
-    try:
-        sky_texture.anisotropy = min(8.0, ctx.info.get("GL_MAX_TEXTURE_MAX_ANISOTROPY", 1.0))
-    except Exception:
-        pass
 
     vertices = np.array(
         [
@@ -1416,11 +1456,32 @@ def main():
     t = 0.0
     running = True
     last_mouse = None
+    pending_screenshot = None
+    benchmark_active = False
+    benchmark_samples = []
 
     while running:
-        dt = clock.tick(FPS) / 60.0
+        frame_ms_raw = clock.tick(FPS)
+        dt = frame_ms_raw / 60.0
         fps = clock.get_fps()
         t += dt * state.time_scale
+
+        now_ms = pygame.time.get_ticks()
+        if state.status_message and state.status_until_ms and now_ms > state.status_until_ms:
+            state.status_message = ""
+            state.status_until_ms = 0
+
+        if benchmark_active:
+            benchmark_samples.append(max(float(frame_ms_raw), 0.001))
+            if len(benchmark_samples) % 15 == 0:
+                set_status(state, f"Benchmarking current mode: {len(benchmark_samples)}/{BENCHMARK_FRAMES} frames", 1.5)
+            if len(benchmark_samples) >= BENCHMARK_FRAMES:
+                report_path = write_benchmark_report(state, benchmark_samples, t)
+                benchmark_active = False
+                benchmark_samples = []
+                msg = f"Benchmark saved: {report_path.name}"
+                print(msg)
+                set_status(state, msg, 5.0)
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -1437,6 +1498,45 @@ def main():
                     state.show_ui = not state.show_ui
                 elif event.key == pygame.K_r:
                     reset(state)
+                    set_status(state, "Reset to default cinematic baseline")
+                elif event.key == pygame.K_1:
+                    set_science_preset(state, "cinematic")
+                    set_status(state, "Mode 1: cinematic baseline")
+                elif event.key == pygame.K_2:
+                    set_science_preset(state, "balanced")
+                    set_status(state, "Mode 2: balanced science")
+                elif event.key == pygame.K_3:
+                    set_science_preset(state, "science")
+                    set_status(state, "Mode 3: strong physics, overlay off")
+                elif event.key == pygame.K_4:
+                    set_science_preset(state, "diagnostic")
+                    set_status(state, "Mode 4: diagnostic overlay, UI on")
+                elif event.key == pygame.K_5:
+                    apply_public_demo_preset(state, "Face On")
+                    set_status(state, "Public demo preset: face-on balanced science")
+                elif event.key == pygame.K_6:
+                    apply_public_demo_preset(state, "Close Up")
+                    set_status(state, "Public demo preset: close-up balanced science")
+                elif event.key == pygame.K_7:
+                    apply_physics_explanation_preset(state)
+                    set_status(state, "Physics explanation preset: diagnostic overlay on")
+                elif event.key == pygame.K_8:
+                    apply_cinematic_output_preset(state)
+                    msg = "Cinematic export preset: UI hidden, balanced science"
+                    print(msg)
+                    set_status(state, msg)
+                elif event.key == pygame.K_p:
+                    pending_screenshot = "with_ui"
+                    set_status(state, "Saving screenshot after this frame...", 1.5)
+                elif event.key == pygame.K_o:
+                    pending_screenshot = "no_ui"
+                    set_status(state, "Saving clean screenshot without UI...", 1.5)
+                elif event.key == pygame.K_b:
+                    benchmark_active = True
+                    benchmark_samples = []
+                    msg = f"Benchmarking current mode for {BENCHMARK_FRAMES} frames..."
+                    print(msg)
+                    set_status(state, msg, 2.5)
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:
@@ -1493,6 +1593,14 @@ def main():
             state.accretion = clamp(state.accretion - 0.006, 0.0, 1.5)
         if keys[pygame.K_y]:
             state.accretion = clamp(state.accretion + 0.006, 0.0, 1.5)
+        if keys[pygame.K_n]:
+            state.science_strength = clamp(state.science_strength - 0.008, 0.0, 1.0)
+        if keys[pygame.K_m]:
+            state.science_strength = clamp(state.science_strength + 0.008, 0.0, 1.0)
+        if keys[pygame.K_j]:
+            state.star_detail = clamp(state.star_detail - 0.010, 0.0, 1.0)
+        if keys[pygame.K_k]:
+            state.star_detail = clamp(state.star_detail + 0.010, 0.0, 1.0)
 
         program["u_resolution"].value = (WIDTH, HEIGHT)
         program["u_time"].value = t
@@ -1514,11 +1622,17 @@ def main():
         program["u_saturation"].value = state.saturation
         program["u_bloom"].value = state.bloom
         program["u_science_overlay"].value = 1.0 if state.science_overlay else 0.0
-        sky_texture.use(1)
-        program["u_background"].value = 1
-
+        program["u_science_strength"].value = state.science_strength
+        program["u_star_detail"].value = state.star_detail
         ctx.clear(0.0, 0.0, 0.0, 1.0)
         vao.render()
+
+        if pending_screenshot == "no_ui":
+            screenshot_path = save_framebuffer(ctx, state, t, fps, include_ui=False)
+            msg = f"Saved clean screenshot: {screenshot_path.name}"
+            print(msg)
+            set_status(state, msg, 5.0)
+            pending_screenshot = None
 
         if state.show_ui:
             ui_surface.fill((0, 0, 0, 0))
@@ -1533,6 +1647,14 @@ def main():
             ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
             ui_vao.render()
             ctx.disable(moderngl.BLEND)
+
+        if pending_screenshot == "with_ui":
+            screenshot_path = save_framebuffer(ctx, state, t, fps, include_ui=state.show_ui)
+            label = "screenshot" if state.show_ui else "screenshot without UI"
+            msg = f"Saved {label}: {screenshot_path.name}"
+            print(msg)
+            set_status(state, msg, 5.0)
+            pending_screenshot = None
 
         pygame.display.flip()
 
